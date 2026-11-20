@@ -39,6 +39,19 @@ if (cmd === "cost") {
   } catch {
     // no log yet
   }
+  // Runs logged by the earlier German version use German stage names and results
+  const KEY_ALIAS = {
+    t_kontext: "t_context", t_basis: "t_baseline", t_schritte: "t_steps", t_pruefung: "t_checks",
+    t_abschluss: "t_final", t_selbstkontrolle: "t_selfreview", t_nachpruefung: "t_recheck",
+    t_zwischenpruefung: "t_midcheck",
+  };
+  const RESULT_ALIAS = { gruen: "green", rot: "red", abbruch: "aborted", fertig: "done", zeitlimit: "timeout", "kein-server": "no-server" };
+  rows = rows.map((r) => {
+    const o = {};
+    for (const [k, v] of Object.entries(r)) o[KEY_ALIAS[k] || k] = v;
+    if (RESULT_ALIAS[o.result]) o.result = RESULT_ALIAS[o.result];
+    return o;
+  });
   if (rows.length === 0) {
     console.log("No runs logged yet (" + FILE + ").");
     process.exit(0);

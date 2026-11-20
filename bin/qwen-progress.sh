@@ -14,7 +14,7 @@ W=".worker"
 if [ ! -d "$W" ] && [ -s "$HOME/.claude/qwen-run.dir" ]; then
   cd "$(cat "$HOME/.claude/qwen-run.dir")" 2>/dev/null || true
 fi
-PAT='^== |Out of scope|^ABORT|^WARNING|^Plan does not|Full check|Tests red|steps, test command|Worker |Exploration failed|Self-review failed|Test model |Review part |Recheck failed|Size: |Mid-run check failed|Intermediate state stays red'
+PAT='^== |Out of scope|^ABORT|^WARNING|^Plan does not|Full check|Tests red|steps, test command|Worker |Exploration failed|Self-review failed|Test model |Review part |Recheck failed|Size: |Mid-run check failed|Intermediate state stays red|plan deviation|points still open|Review points open|Back to the state before'
 # Activity updates: at the earliest this many seconds after the last update
 ACT_EVERY=240
 # Quiet (default): only updates you react to - plan, red, time limit, review points,
@@ -178,6 +178,10 @@ event() {
       v=${l#== 3/6 }; v=$(model_name "${v% writes the tests}")
       say "$v writes the tests first." ;;
     *"Test model "*" failed"*) say "The test model failed, Qwen writes the tests." ;;
+    *"plan deviation"*)
+      v=${l#*Tests found }; v=${v%% plan deviation*}
+      say "While writing the tests, $v contradiction(s) between plan and code turned up; Qwen and the reviewers get the real behavior:"
+      say "$(sed 's/^/  /' "$W/deviations.md" 2>/dev/null | cut -c1-170 | head -6)" ;;
     "== 4/6"*)
       i=$(printf '%s' "$l" | sed -n 's/.*step \([0-9]*\)\/\([0-9]*\).*/\1/p')
       total=$(printf '%s' "$l" | sed -n 's/.*step \([0-9]*\)\/\([0-9]*\).*/\2/p')
@@ -213,9 +217,11 @@ event() {
       v=${l#== 6/6 }; say "Now comes the final review by $(model_name "${v% reviews}")." ;;
     "== Review: OK"*) say "The review found nothing to fix." ;;
     "== Qwen fixes the review points"*)
-      pts=$(grep -cE '^[0-9]+\. ' "$W/review.md" 2>/dev/null)
+      # review-points.md holds only the points in scope (review.md also has out-of-scope ones)
+      f="$W/review-points.md"; [ -s "$f" ] || f="$W/review.md"
+      pts=$(grep -cE '^[0-9]+\. ' "$f" 2>/dev/null)
       say "The review found ${pts:-some} point(s), Qwen fixes them:"
-      say "$(grep -E '^[0-9]+\. ' "$W/review.md" 2>/dev/null | sed 's/\*\*//g; s/`//g' | head -8 |
+      say "$(grep -E '^[0-9]+\. ' "$f" 2>/dev/null | sed 's/\*\*//g; s/`//g' | head -8 |
         awk '{ if (length($0) > 170) print "  " substr($0, 1, 170) " ..."; else print "  " $0 }')" ;;
     *"Review part "*)
       v=${l##*Review part }
@@ -226,6 +232,12 @@ event() {
       v=$(model_name "${l#== Recheck by }")
       say "Now $v rechecks whether the review points are really fixed." ;;
     "== Recheck: OK"*) say "The recheck found nothing to fix." ;;
+    "== Recheck 2: OK"*) commit_note; say "The second recheck confirms the follow-up fixes." ;;
+    *"points still open"*) commit_note; say "The second recheck still finds open points. They are not fixed and are listed in .worker/review.md." ;;
+    *"Worker failed while fixing review points"*)
+      say "The local model failed while fixing the review points. The run goes back to the state before the review fixes and finishes from there." ;;
+    *"Back to the state before"*) ;;
+    *"Review points open"*) say "The review points stay open; they are listed in .worker/review.md." ;;
     "== Recheck: Qwen"*)
       say "The recheck still found points, Qwen follows up:"
       say "$(grep -E '^[0-9]+\. ' "$W/review2.md" 2>/dev/null | sed 's/\*\*//g; s/`//g' | head -6 |

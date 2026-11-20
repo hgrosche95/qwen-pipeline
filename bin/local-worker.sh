@@ -42,6 +42,10 @@ export DISABLE_TELEMETRY=1
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384
 export CLAUDE_CONFIG_DIR="$HOME/.claude-worker"
+# No auto memory for the worker: it used to write notes per project (13 files after a few
+# days) that every later session loaded - stale plan states, and a recipe for starting E2E
+# tests with server and database, which made it start servers and read server/.env.
+export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 
 export CLAUDE_CODE_EFFORT_LEVEL="${WORKER_EFFORT:-low}"
 export API_FORCE_IDLE_TIMEOUT=0
@@ -63,7 +67,24 @@ else
   TOOLS="Read,Glob,Grep,Edit,Write,Bash"
 fi
 
-TMIN="${WORKER_TIMEOUT_MIN:-20}"
+# Guard variant (for /qwen-guard and /qhandoff): WORKER_GUARD=1 loads a PreToolUse hook
+# (worker-guard.js: protection patterns, repeat counter, shortened test output) and sets the
+# time limit to WORKER_TIMEOUT_MIN (default 30). Without WORKER_GUARD: no hook, 20 minutes.
+# The settings file is generated here, so it always points to this installation.
+GUARD_ARGS=()
+if [ "${WORKER_GUARD:-0}" = "1" ]; then
+  GUARD_JS="$HOME/.claude/bin/worker-guard.js"
+  command -v cygpath >/dev/null 2>&1 && GUARD_JS=$(cygpath -m "$GUARD_JS")
+  GSET="$HOME/.claude/state/worker-guard-settings.json"; mkdir -p "$(dirname "$GSET")"
+  printf '{"hooks":{"PreToolUse":[{"matcher":"Bash|Write|Edit|MultiEdit|Read","hooks":[{"type":"command","command":"node \\"%s\\"","timeout":10}]}]}}\n' "$GUARD_JS" > "$GSET"
+  GUARD_ARGS=(--settings "$GSET")
+  TMIN="${WORKER_TIMEOUT_MIN:-30}"
+  export GUARD_MODE="${GUARD_MODE:-log}"
+  export WORKER_RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+  mkdir -p "$HOME/.claude/logs"
+else
+  TMIN="${WORKER_TIMEOUT_MIN:-20}"
+fi
 case "$TMIN" in ''|*[!0-9]*) TMIN=20 ;; esac
 
 SYS="You are the worker, not the tech lead."
@@ -72,6 +93,7 @@ SYS="$SYS Do not start servers, containers or long-running processes: no 'docker
 SYS="$SYS 'npm start', 'npm run dev', watch modes or background jobs with &."
 SYS="$SYS Never write wait or poll loops (while/until with sleep, waiting for a port, a container or a file)."
 SYS="$SYS If something needs a running service, do not wait for it: say so in the summary."
+SYS="$SYS Do not run end-to-end tests (Playwright, Cypress) and do not read .env files."
 SYS="$SYS You only have 40 turns: never read large files (CSS, over 500 lines) in full, but search with Grep"
 SYS="$SYS and then read selectively with offset and limit; do not read any file twice."
 SYS="$SYS Start changing things after 15 turns at the latest."
@@ -81,15 +103,25 @@ if [ -n "${WORKER_ACTIVITY:-}" ] && command -v node >/dev/null 2>&1; then
   # Live transcript: the worker emits its steps as a JSON stream, worker-stream.js writes
   # every tool use to $WORKER_ACTIVITY and only passes on the final report -
   # for the caller the output looks the same as without the transcript.
-  timeout "${TMIN}m" claude -p --max-turns 40 --allowedTools "$TOOLS" --output-format stream-json --verbose \
+  timeout "${TMIN}m" claude -p --max-turns 40 --allowedTools "$TOOLS" "${GUARD_ARGS[@]}" --output-format stream-json --verbose \
     --append-system-prompt "$SYS" \
     < "$TASK" 2>&1 | node "$HOME/.claude/bin/worker-stream.js" "$WORKER_ACTIVITY" | tee "$LOG"
   STATUS=${PIPESTATUS[0]}
 else
-  timeout "${TMIN}m" claude -p --max-turns 40 --allowedTools "$TOOLS" \
+  timeout "${TMIN}m" claude -p --max-turns 40 --allowedTools "$TOOLS" "${GUARD_ARGS[@]}" \
     --append-system-prompt "$SYS" \
     < "$TASK" 2>&1 | tee "$LOG"
   STATUS=${PIPESTATUS[0]}
 fi
 [ "$STATUS" -eq 124 ] && echo "WORKER-TIMEOUT: aborted after $TMIN minutes" | tee -a "$LOG"
+# Guard variant: summary of this run only into the worker log, not to stdout (qwen-first.sh
+# evaluates the last lines of stdout as the result)
+if [ "${WORKER_GUARD:-0}" = "1" ]; then
+  GLOG="$HOME/.claude/logs/worker-guard.log"
+  if [ -f "$GLOG" ]; then
+    cnt() { grep -F "run=$WORKER_RUN_ID " "$GLOG" | grep -c " $1 "; }
+    echo "[guard] run $WORKER_RUN_ID, mode $GUARD_MODE: $(cnt HIT) hits, $(cnt REPEAT) repeat entries," \
+      "$(cnt TESTWRAP) shortened test runs, $(cnt HOOK-ERROR) hook errors" >> "$LOG"
+  fi
+fi
 exit "$STATUS"

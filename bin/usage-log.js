@@ -24,7 +24,9 @@ if (process.argv[2] === "--sum") {
       cache_read: u.cache_read_input_tokens || 0,
       output: u.output_tokens || 0,
       cost: j.total_cost_usd || 0,
-      iter: (u.iterations || []).length || 1,
+      // Turns of the call: num_turns from the result (usage.iterations is usually missing,
+      // so this used to show "turns 1" even for a 20-turn test run)
+      iter: j.num_turns || (u.iterations || []).length || 1,
     }) + "\n");
     process.stdout.write((j.result || "") + "\n");
   });

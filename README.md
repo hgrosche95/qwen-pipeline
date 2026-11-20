@@ -9,15 +9,24 @@ spent on the free local model; the paid models only see short, focused prompts.
 | `/qwen <task>` | Full pipeline: Opus plans, Sonnet writes tests, Qwen implements step by step, Opus/Sonnet reviews, Qwen fixes the review points. |
 | `/qwen-no-tests <task>` | Same, but without tests: only build/linter check and review. |
 | `/q <small change>` | Qwen alone, no Claude model involved. Nothing is committed, nothing is checked. |
+| `/qwen-guard <task>` | Like `/qwen`, but the worker runs with a guard hook (dangerous commands, secret files, repeats), a 30-minute limit and shortened test output. |
+| `/qwen-queue [file]` | Several tasks one after another from `.worker/queue.txt`, each building on the previous one. |
+| `/qhandoff <task>` | Opus writes plan, scaffold and tests itself, Qwen finishes, Opus only checks diff and tests. |
 
 ## How a `/qwen` run works
 
 1. **Context**: file list, manifests and CI workflows; for projects with more than 40 files Qwen also explores read-only.
 2. **Plan** (`PLAN_MODEL`, default `opus`): 2 to 8 small steps, a test command (`TEST:`) and a full CI check (`CHECK:`).
-3. **Tests first** (`TEST_MODEL`, default `sonnet`; falls back to Qwen).
+3. **Tests first** (`TEST_MODEL`, default `sonnet`; falls back to Qwen). The test model also
+   reports where the code contradicts the plan (`PLAN-DEVIATIONS:`); these facts go into every
+   later prompt for Qwen and the reviewers, because the planner never sees the code.
 4. **Implementation**: Qwen implements each step in a fresh session, one commit per step. Large plans get a mid-run review.
 5. **Self-review** by Qwen, only if checks are still red (`SELF_REVIEW=auto`).
-6. **Final review** (`REVIEW_MODEL`, default `opus`, `sonnet` for small diffs), Qwen fixes the points, then a cheap recheck of the fixes.
+6. **Final review** (`REVIEW_MODEL`, default `opus`, `sonnet` for small diffs), Qwen fixes the points,
+   then a cheap recheck of the fixes. If the recheck still finds points, Qwen gets one more round
+   and a second recheck verifies it; whatever is still open is reported as open, not as fixed.
+   If the worker fails while fixing review points, the run falls back to the green state before
+   the review fixes (partial work on `<branch>-partial`) and finishes with the points marked open.
 
 Everything happens on a new branch `qwen/<date-time>`. At the end the run prints an
 apply command (`git merge --squash`); nothing is merged, committed to your branch or pushed
@@ -54,7 +63,9 @@ STRATA_MODEL=qwen3.8-flash-next-iq3_xxs
 ```
 
 The worker runs with its own Claude Code config directory `~/.claude-worker`, so your
-normal settings, hooks and MCP servers do not apply to it.
+normal settings, hooks and MCP servers do not apply to it. Auto memory is turned off for the
+worker (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`): notes from earlier sessions made it repeat stale
+plans and start end-to-end tests with servers.
 
 ## Files
 
@@ -67,6 +78,9 @@ normal settings, hooks and MCP servers do not apply to it.
 | `bin/worker-stream.js` | Records the worker's tool use for progress updates |
 | `bin/usage-log.js` | Logs tokens and cost per Claude call to `.worker/usage.log` |
 | `bin/run-log.js` | One line per run in `~/.claude/qwen-runs.jsonl`; `node ~/.claude/bin/run-log.js show` |
+| `bin/qwen-queue.sh` | Behind `/qwen-queue` |
+| `bin/worker-guard.js` | PreToolUse hook for the worker with `WORKER_GUARD=1` (log: `~/.claude/logs/worker-guard.log`, `GUARD_MODE=block` to deny) |
+| `bin/test-wrap.sh` | Used by the guard: full test output to `~/.claude/logs/tests/`, only the essentials to the model |
 
 Per-project working files go to `.worker/` (excluded via `.git/info/exclude`, never committed).
 Review rules learned across runs are collected in `~/.claude/worker-lessons.md`.
@@ -82,8 +96,10 @@ Review rules learned across runs are collected in `~/.claude/worker-lessons.md`.
 | `NO_TESTS` | `0` | `1` = no tests |
 | `SELF_REVIEW` | `auto` | `0` never, `1` always |
 | `PARTS` | auto | `1` never split, `2` always split into two parts |
-| `SPLIT_LINES` / `STEP_LINES` | `350` / `100` | Size thresholds for splitting |
-| `WORKER_TIMEOUT_MIN` | `20` | Time limit per worker session |
+| `TEST_TURNS` | `12` | Turn limit of the test model (each turn re-reads the history, the biggest cost item) |
+| `SPLIT_LINES` / `STEP_LINES` | `350` / `60` | Size thresholds for splitting |
+| `WORKER_TIMEOUT_MIN` | `20` (`30` with guard) | Time limit per worker session |
+| `WORKER_GUARD` / `GUARD_MODE` | `0` / `log` | Guard hook on; `block` denies dangerous calls instead of logging them |
 | `WORKER_CMD_TIMEOUT_MS` / `WORKER_CMD_MAX_TIMEOUT_MS` | `300000` / `600000` | Limit per worker shell command, so servers or wait loops cannot block a stage |
 | `CHECK_TIMEOUT_MIN` | `15` | Limit per test/check run of the pipeline (`0` = no limit) |
 | `ALLOW_RED_BASE` / `ALLOW_ANY_BRANCH` | `0` | Override the start checks |

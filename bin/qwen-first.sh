@@ -9,7 +9,7 @@
 #   worker write them as before. If the model fails, Qwen takes over.
 # Large plans (sum of estimated lines above SPLIT_LINES, default 350) are built in two parts
 #   with a mid-run review by MID_REVIEW_MODEL (default sonnet). PARTS=1 turns this off,
-#   PARTS=2 forces it. STEP_LINES (default 100) is the upper limit per step in the plan.
+#   PARTS=2 forces it. STEP_LINES (default 60) is the upper limit per step in the plan.
 set -uo pipefail
 TASK="${1:?Usage: qwen-first.sh \"task\"}"
 PR="${PR:-0}"
@@ -70,8 +70,10 @@ wprompt() {
 strong_tests() {
   local rc
   # TEST_TURNS limits the turns: each one re-reads the whole history from the cache, which was
-  # the biggest cost item. If it is not enough, Qwen takes over (return 1).
-  LOCAL_WORKER_ACTIVE=1 timeout 15m claude -p --model "$TEST_MODEL" --max-turns "${TEST_TURNS:-20}" \
+  # the biggest cost item (Nov 20: 0.32 of 0.56 USD, 778k cache tokens for ~20 turns of
+  # exploring). The prompt now carries the project context, so fewer turns suffice.
+  # If it is not enough, Qwen takes over (return 1).
+  LOCAL_WORKER_ACTIVE=1 timeout 15m claude -p --model "$TEST_MODEL" --max-turns "${TEST_TURNS:-12}" \
     --allowedTools "Read,Glob,Grep,Edit,Write,Bash" --output-format json \
     --append-system-prompt "You only write tests. Do not change production code, do not commit, do not start servers or long-running processes. Finish with a summary of at most 10 lines." \
     < "$1" 2>&1 | node "$HOME/.claude/bin/usage-log.js" "tests-$TEST_MODEL" > "$2"
@@ -128,10 +130,24 @@ work() {
 
 # The worker stays down: save the state, go back to the starting branch, end the run.
 # No review of a half-done state, and the user is not left on a broken branch.
+# Exception (SOFT_FAIL=1, while fixing review points): the state before the review fixes was
+# complete, so the run falls back to it and ends normally with the points marked as open.
+# The half-done fixes are kept on the branch <branch>-partial.
 die_worker() {
   local why
   why=$(grep -v '^\[claude-code:' "$2" 2>/dev/null | grep -v '^ *$' | tail -1 | cut -c1-160)
   commit "aborted in $1 (incomplete)"
+  if [ "${SOFT_FAIL:-0}" = "1" ] && [ -n "${RFIX_BASE:-}" ]; then
+    SOFT_FAIL=0
+    git branch -q -f "$BRANCH-partial" HEAD
+    git reset -q --hard "$RFIX_BASE"
+    RED=${PRE_RED:-0}; RECHECK=fallback
+    echo "   Worker failed while fixing review points ($1). ${why:-No answer from the model.}"
+    echo "   Back to the state before the review fixes; the partial fixes are on $BRANCH-partial"
+    OPEN_NOTE="Review points open: not fixed because the worker failed, see $W/review.md"
+    final_wrapup
+    exit 0
+  fi
   git checkout -q "$PREV" 2>/dev/null
   echo "ABORT: The local worker failed ($1). ${why:-No answer from the model.}"
   echo "   The state so far is on branch $BRANCH, you are back on $PREV."
@@ -232,7 +248,7 @@ mid_review() {
   echo "== Mid-run check after step $SPLIT/$STEPS by $model"
   fix_loop m || echo "   Intermediate state stays red, continuing with part 2"
   rest=$(grep '^## Step ' "$W/plan.md" | sed -n "$((SPLIT+1)),\$p" | sed 's/^## /- /')
-  { echo "Task: $TASK"; echo; echo "Plan:"; cat "$W/plan.md"; echo
+  { echo "Task: $TASK"; echo; echo "Plan:"; cat "$W/plan.md"; echo; devnote
     echo "This is a mid-run check: steps 1 to $SPLIT of $STEPS are implemented."
     echo "These steps only come afterwards and are missing on purpose, do not count them as a gap:"
     echo "$rest"; echo
@@ -423,7 +439,7 @@ echo "== 2/6 $PLAN_MODEL is planning"
   echo "## Step 2: <title>"
   echo "Rules: 2 to 8 steps, each self-contained and building on the previous one."
   echo "The developer has only 40 tool calls and 20 minutes per step: a step changes"
-  echo "at most about ${STEP_LINES:-100} lines in at most 2 files, otherwise split it. Estimate the"
+  echo "at most about ${STEP_LINES:-60} lines in at most 2 files, otherwise split it. Estimate the"
   echo "size honestly, including styles and types. If all steps together add up to more than about"
   echo "${SPLIT_LINES:-350} lines, set SPLIT to the step after which a first part that runs on its own"
   echo "is done (roughly half): that is where it gets checked and reviewed in between."
@@ -496,6 +512,7 @@ if [ -n "$CHECKCMD" ] && [ "$NFILES" -gt 0 ] && ! run_check "$CHECKCMD" > "$W/ch
 fi
 
 mark tests
+: > "$W/deviations.md"
 # --- 3 Tests first -----------------------------------------------------------
 if [ "$NO_TESTS" = "1" ]; then
 echo "== 3/6 skipped (NO_TESTS=1)"
@@ -506,16 +523,41 @@ if [ "$TEST_MODEL" = "qwen" ]; then echo "== 3/6 Qwen writes the tests"; else ec
   echo "duplicates. The tests may fail for now."
   echo "Set up the test tool if needed, so that '$TESTCMD' can run."
   echo "Write the tests into the file the plan names for each step under 'Test file:'."
-  echo "Read selectively: the files named in the plan and the test file (for fixtures, helpers"
-  echo "and style). Do not explore the project beyond that and run the tests at most once."
+  echo "The project context below is already explored: do not explore the project again."
+  echo "Read only the files named in the plan and the test file (for fixtures, helpers and"
+  echo "style), and run the tests at most once."
+  echo "The plan was written without seeing the code. If the code contradicts the plan (status"
+  echo "codes, response formats, names, signatures), test the real behavior and end your answer"
+  echo "with a section exactly like this, one line per contradiction:"
+  echo "PLAN-DEVIATIONS:"
+  echo "- <file>: plan says <X>, code actually does <Y>"
+  echo "If there is no contradiction, end with the line: PLAN-DEVIATIONS: none"
   echo; echo "Task: $TASK"; echo; cat "$W/plan.md"
+  echo; echo "Project context:"; cat "$W/context.txt"
 } | wprompt "$W/q3-tests.md"
 if [ "$TEST_MODEL" = "qwen" ] || ! strong_tests "$W/q3-tests.md" "$W/tests.txt"; then
   [ "$TEST_MODEL" = "qwen" ] || echo "   Test model $TEST_MODEL failed, Qwen writes the tests"
   work code "$W/q3-tests.md" "$W/tests.txt" || die_worker "writing tests" "$W/tests.txt"
 fi
 commit "Tests"
+# Plan deviations found while writing the tests go into every later prompt (via plan-head.md
+# and the reviews): on Nov 20 the plan said 404, the code returned 400, the test model
+# noticed it, but Qwen and the reviewer never heard of it and it became 2 review points.
+awk '/^PLAN-DEVIATIONS:/{f=1; next} f && /^[[:space:]]*[-*] /{print}' "$W/tests.txt" \
+  | sed 's/^[[:space:]]*\* /- /' | head -12 > "$W/deviations.md"
+NDEV=$(grep -c '' "$W/deviations.md")
+if [ "$NDEV" -gt 0 ]; then
+  { echo; echo "## Facts found while writing the tests (they take precedence over the plan)"
+    cat "$W/deviations.md"; } >> "$W/plan-head.md"
+  echo "   Tests found $NDEV plan deviation(s), passed on to all later steps"
 fi
+fi
+# Deviations section for the review prompts (empty if there are none)
+devnote() {
+  [ -s "$W/deviations.md" ] || return 0
+  echo "Facts found while writing the tests; they take precedence over the plan, so code that"
+  echo "follows them instead of the plan is correct:"; cat "$W/deviations.md"; echo
+}
 
 # --- 4 Implementation step by step, each in a fresh session ------------------
 mark steps
@@ -590,7 +632,7 @@ echo "== 5/6 Qwen reviews its own diff"
   echo "plan's files, name the smallest fix at exactly that location."
   echo "You cannot run commands. The checks have already run, the result is below:"
   echo "do not recompute by hand what they already prove."
-  echo; echo "Task: $TASK"; echo; cat "$W/plan.md"
+  echo; echo "Task: $TASK"; echo; cat "$W/plan.md"; echo; devnote
   echo; echo "Checks: test command '$TESTCMD'${CHECKCMD:+, full check '$CHECKCMD'}."
   if [ "$RED" -eq 1 ]; then echo "State: RED. Last output:"; else echo "State: green. Last output:"; fi
   tail -15 "$W/test.txt"
@@ -616,6 +658,59 @@ if [ "$SELF_OK" -eq 1 ] && ! tail -3 "$W/selfreview.txt" | grep -qx "OK"; then
 fi
 fi
 
+# --- End of the run: last full check, summary, optional PR ----------------------
+# A function, so die_worker can also end a run here after falling back (SOFT_FAIL=1).
+final_wrapup() {
+  mark final
+  # Last full check, in case self-review or review still changed something
+  if [ "$RED" -eq 0 ]; then full_check h || RED=1; fi
+  echo
+  if [ "$RED" -eq 1 ]; then
+    echo "WARNING: Tests are still red, see $W/test.txt"
+  else
+    echo "Test command green: $TESTCMD"
+    [ -n "$CHECKCMD" ] && echo "Full check green: $CHECKCMD"
+  fi
+  RUN_DONE=1
+  echo "== Done on branch $BRANCH"
+  echo "   View:    git diff $BASE --stat"
+  echo "   Plan:    $W/plan.md    Review: $W/review.md"
+  echo "   Apply:   git checkout - && git merge --squash $BRANCH && git branch -D $BRANCH"
+  [ "$NOUT" -gt 0 ] && echo "   Out of scope: $NOUT point(s), not fixed, see $W/later.md"
+  [ -n "${OPEN_NOTE:-}" ] && echo "   $OPEN_NOTE"
+  # --- Optional: pull request (no model, just git and gh) ----------------------
+  if [ "$PR" = "1" ]; then
+    if [ "$RED" -eq 1 ]; then
+      echo "== No PR: the test command is red"
+    elif ! git remote get-url origin >/dev/null 2>&1; then
+      echo "== No PR: this project has no remote 'origin'"
+    elif ! command -v gh >/dev/null 2>&1; then
+      echo "== No PR: gh is not installed"
+    else
+      { echo "Created by qwen-first.sh: a local model builds, $PLAN_MODEL plans, $REVIEW_MODEL reviews."
+        echo; echo "## Task"; echo "$TASK"
+        echo; echo "## Test command"; echo "\`$TESTCMD\` (green)"
+        [ -n "$CHECKCMD" ] && { echo; echo "## Full check"; echo "\`$CHECKCMD\` (green)"; }
+        echo; echo "## Plan"; cat "$W/plan.md"
+        echo; echo "## Review"; cat "$W/review.md"
+      } > "$W/pr-body.md"
+      TITLE=$(printf '%s' "$TASK" | head -1 | cut -c1-70)
+      BASEARG=()
+      if git ls-remote --exit-code --heads origin "$PREV" >/dev/null 2>&1; then
+        BASEARG=(--base "$PREV")
+      else
+        echo "   Note: '$PREV' does not exist on GitHub, the PR targets the default branch"
+      fi
+      if git push -q -u origin "$BRANCH" \
+        && gh pr create "${BASEARG[@]}" --head "$BRANCH" --title "$TITLE" --body-file "$W/pr-body.md"; then
+        echo "== Pull request created"
+      else
+        echo "== PR could not be created (push or gh failed), the branch stays local"
+      fi
+    fi
+  fi
+}
+
 # --- 6 Final review ----------------------------------------------------------
 # Test hook: REVIEW_BASE=<commit> makes the review check from that state instead of from the
 # start of the run (for the review test with deliberately planted bugs). Without the variable,
@@ -631,7 +726,7 @@ NLINES=$(git diff "$RBASE" -- "${SRC[@]}" | wc -l)
 if [ "$NLINES" -lt 150 ] && [ "$RED" -eq 0 ]; then REVIEW_MODEL="${SMALL_REVIEW_MODEL:-sonnet}"; fi
 mark review
 echo "== 6/6 $REVIEW_MODEL reviews"
-{ echo "Task: $TASK"; echo; echo "Plan:"; cat "$W/plan.md"; echo
+{ echo "Task: $TASK"; echo; echo "Plan:"; cat "$W/plan.md"; echo; devnote
   [ "$RED" -eq 1 ] && { echo "WARNING: The tests are still red:"; tail -30 "$W/test.txt"; echo; }
   [ -n "$CHECKCMD" ] && [ "$RED" -eq 0 ] && { echo "Full check (like the CI) is green: $CHECKCMD"; echo; }
   if [ -n "$MID_BASE" ] && [ -z "${REVIEW_BASE:-}" ]; then
@@ -666,6 +761,8 @@ awk -v out="$W/later.md" -v keep="$W/review-inscope.md" '
 NOUT=$(grep -cE '^[0-9]+\. ' "$W/later.md")
 NIN=$(grep -cE '^[0-9]+\. ' "$W/review-inscope.md")
 
+NPTS=$NIN
+OPEN_NOTE=""
 if grep -qx "OK" "$W/review.md" || { [ "$NIN" -eq 0 ] && [ "$NOUT" -gt 0 ]; }; then
   echo "== Review: OK"
 else
@@ -673,94 +770,65 @@ else
   mark reviewfix
   echo "== Qwen fixes the review points"
   cp "$W/review-inscope.md" "$W/review-points.md"
-  RFIX_BASE=$(git rev-parse HEAD)
+  RFIX_BASE=$(git rev-parse HEAD); PRE_RED=$RED
+  # From here on a worker failure no longer aborts the run: die_worker goes back to the
+  # state before the review fixes (Nov 18: a run with green steps was thrown away after
+  # 52 minutes because the worker failed while fixing review points).
+  SOFT_FAIL=1
   fix_points "$W/review-points.md" review "Review points"
   RED=0; fix_loop d || RED=1
 
   # Recheck: a second, cheap look at only the fix diff. Without it, nobody looks at the code
-  # after the review fixes, only the check commands.
-  # At most one follow-up round. RECHECK_MODEL=none turns it off.
+  # after the review fixes, only the check commands. Round 1 may send points back to Qwen
+  # once; round 2 only checks that follow-up (Nov 20: Qwen "fixed" a point with comments
+  # only, and nobody looked at its second attempt). RECHECK_MODEL=none turns it off.
   RECHECK_MODEL="${RECHECK_MODEL:-sonnet}"
-  if [ "$RECHECK_MODEL" != "none" ] && [ "$(git rev-parse HEAD)" != "$RFIX_BASE" ]; then
-    mark recheck
-    echo "== Recheck by $RECHECK_MODEL"
-    { echo "Task: $TASK"; echo; echo "A review found these points:"; cat "$W/review-points.md"; echo
+  recheck() {   # recheck <base commit> <points file> <round>
+    { echo "Task: $TASK"; echo; echo "These points had to be fixed:"; cat "$2"; echo
       [ "$RED" -eq 1 ] && { echo "WARNING: The checks are red after the fix:"; tail -30 "$W/test.txt"; echo; }
       echo "A weaker developer addressed them with this diff (truncated if too long):"
-      git diff "$RFIX_BASE" -- . ':(exclude)*.lock' ':(exclude)package-lock.json' | head -c 50000; echo
-      echo "Check only two things: Is each point really fixed, and did the fix break anything"
-      echo "new? List only that, as a numbered list with file and concrete fix."
+      git diff "$1" -- . ':(exclude)*.lock' ':(exclude)package-lock.json' | head -c 50000; echo
+      echo "Check only two things: Is each point really fixed in the code (a comment that"
+      echo "claims it is fixed does not count), and did the fix break anything new? List only"
+      echo "that, as a numbered list with file and concrete fix."
       echo "No new wishes and no new review of the rest of the code."
       if [ "$NO_TESTS" = "1" ]; then echo "No tests were ordered on purpose: do not ask for any."; fi
       echo "If everything is fine, answer only: OK"
-    } | llm "$RECHECK_MODEL" "You are a code reviewer. Answer directly and concisely." recheck > "$W/review2.md"
-    if ! grep -q '[^[:space:]]' "$W/review2.md"; then
+    } | llm "$RECHECK_MODEL" "You are a code reviewer. Answer directly and concisely." "recheck$3" > "$W/review2-$3.md"
+    if ! grep -q '[^[:space:]]' "$W/review2-$3.md"; then return 2; fi
+    { echo; echo "## Recheck $3 of the fixes ($RECHECK_MODEL)"; cat "$W/review2-$3.md"; } >> "$W/review.md"
+    grep -qx "OK" "$W/review2-$3.md"
+  }
+  if [ "$RECHECK_MODEL" != "none" ] && [ "$(git rev-parse HEAD)" != "$RFIX_BASE" ]; then
+    mark recheck
+    echo "== Recheck by $RECHECK_MODEL"
+    recheck "$RFIX_BASE" "$W/review-points.md" 1; rc=$?
+    cp "$W/review2-1.md" "$W/review2.md" 2>/dev/null
+    if [ "$rc" -eq 2 ]; then
       echo "   Recheck failed, skipping it"; RECHECK=failed
+    elif [ "$rc" -eq 0 ]; then
+      echo "== Recheck: OK"; RECHECK=ok
     else
-      { echo; echo "## Recheck of the fixes ($RECHECK_MODEL)"; cat "$W/review2.md"; } >> "$W/review.md"
-      if grep -qx "OK" "$W/review2.md"; then
-        echo "== Recheck: OK"; RECHECK=ok
+      echo "== Recheck: Qwen follows up"; RECHECK=points
+      R2_BASE=$(git rev-parse HEAD)
+      { echo "A recheck of your review fixes found these points. Fix them completely in the"
+        echo "code (do not just add comments) and then run '$TESTCMD' until it is green."
+        echo "Keep every fix as small as possible. Do not add new features or new tests."
+        cat "$W/review2-1.md"; echo; echo "Task: $TASK"; echo; cat "$W/plan-head.md"
+      } | wprompt "$W/q6-recheck.md"
+      work code "$W/q6-recheck.md" "$W/recheckfix.txt" || die_worker "fixing recheck" "$W/recheckfix.txt"
+      commit "Recheck"
+      RED=0; fix_loop e || RED=1
+      if [ "$(git rev-parse HEAD)" = "$R2_BASE" ]; then
+        OPEN_NOTE="Recheck: points still open (Qwen changed nothing), see $W/review.md"; RECHECK=open
       else
-        echo "== Recheck: Qwen follows up"; RECHECK=points
-        { echo "A recheck of your review fixes found these points. Fix them completely"
-          echo "and then run '$TESTCMD' until it is green. Keep every fix as small as"
-          echo "possible. Do not add new features or new tests."
-          cat "$W/review2.md"; echo; echo "Task: $TASK"; echo; cat "$W/plan-head.md"
-        } | wprompt "$W/q6-recheck.md"
-        work code "$W/q6-recheck.md" "$W/recheckfix.txt" || die_worker "fixing recheck" "$W/recheckfix.txt"
-        commit "Recheck"
-        RED=0; fix_loop e || RED=1
+        recheck "$R2_BASE" "$W/review2-1.md" 2; rc=$?
+        if [ "$rc" -eq 0 ]; then echo "== Recheck 2: OK"; RECHECK=ok2
+        elif [ "$rc" -eq 2 ]; then echo "   Recheck failed, skipping it"; RECHECK=points
+        else OPEN_NOTE="Recheck: points still open, see $W/review.md"; RECHECK=open; fi
       fi
     fi
   fi
+  SOFT_FAIL=0
 fi
-
-mark final
-# Last full check, in case self-review or review still changed something
-if [ "$RED" -eq 0 ]; then full_check h || RED=1; fi
-
-echo
-if [ "$RED" -eq 1 ]; then
-  echo "WARNING: Tests are still red, see $W/test.txt"
-else
-  echo "Test command green: $TESTCMD"
-  [ -n "$CHECKCMD" ] && echo "Full check green: $CHECKCMD"
-fi
-RUN_DONE=1
-echo "== Done on branch $BRANCH"
-echo "   View:    git diff $BASE --stat"
-echo "   Plan:    $W/plan.md    Review: $W/review.md"
-echo "   Apply:   git checkout - && git merge --squash $BRANCH && git branch -D $BRANCH"
-[ "$NOUT" -gt 0 ] && echo "   Out of scope: $NOUT point(s), not fixed, see $W/later.md"
-
-# --- Optional: pull request (no model, just git and gh) ----------------------
-if [ "$PR" = "1" ]; then
-  if [ "$RED" -eq 1 ]; then
-    echo "== No PR: the test command is red"
-  elif ! git remote get-url origin >/dev/null 2>&1; then
-    echo "== No PR: this project has no remote 'origin'"
-  elif ! command -v gh >/dev/null 2>&1; then
-    echo "== No PR: gh is not installed"
-  else
-    { echo "Created by qwen-first.sh: a local model builds, $PLAN_MODEL plans, $REVIEW_MODEL reviews."
-      echo; echo "## Task"; echo "$TASK"
-      echo; echo "## Test command"; echo "\`$TESTCMD\` (green)"
-      [ -n "$CHECKCMD" ] && { echo; echo "## Full check"; echo "\`$CHECKCMD\` (green)"; }
-      echo; echo "## Plan"; cat "$W/plan.md"
-      echo; echo "## Review"; cat "$W/review.md"
-    } > "$W/pr-body.md"
-    TITLE=$(printf '%s' "$TASK" | head -1 | cut -c1-70)
-    BASEARG=()
-    if git ls-remote --exit-code --heads origin "$PREV" >/dev/null 2>&1; then
-      BASEARG=(--base "$PREV")
-    else
-      echo "   Note: '$PREV' does not exist on GitHub, the PR targets the default branch"
-    fi
-    if git push -q -u origin "$BRANCH" \
-      && gh pr create "${BASEARG[@]}" --head "$BRANCH" --title "$TITLE" --body-file "$W/pr-body.md"; then
-      echo "== Pull request created"
-    else
-      echo "== PR could not be created (push or gh failed), the branch stays local"
-    fi
-  fi
-fi
+final_wrapup

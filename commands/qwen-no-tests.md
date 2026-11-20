@@ -50,6 +50,9 @@ first, in one sentence, what is now built. Then: checks green or red, what the r
 found and whether it is fixed, the branch, the cost according to SUM. Finally ask whether
 you should apply the change.
 
+If the log reports open points ("Review points open" or "Recheck: points still open"), name
+them in one line each from .worker/review.md; do not present the run as fully clean.
+
 If the run aborted because of the starting branch ("Not starting from this branch"), say so
 in one sentence and name the branch to switch to; do not switch branches yourself.
 
