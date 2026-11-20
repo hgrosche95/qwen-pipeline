@@ -14,6 +14,10 @@
 #   writes the tests. If the plan estimates more than LITE_MAX_LINES (default 150) changed
 #   lines, the run stops right after the plan and recommends the full pipeline.
 #   Explicitly set PLAN_MODEL/REVIEW_MODEL/TEST_MODEL still win.
+# Benchmark helpers (used by qwen-bench.sh): STOP_AFTER_TESTS=1 ends the run after plan and
+#   tests and saves them to PREPARE_OUT (default .worker/prepared); PREPARED_DIR=<dir> starts
+#   from such a prepared branch and skips context, plan and tests; SKIP_REVIEW=1 skips
+#   self-review and final review. WORKER_HARNESS and BENCH_ID are recorded in the run log.
 set -uo pipefail
 TASK="${1:?Usage: qwen-first.sh \"task\"}"
 PR="${PR:-0}"
@@ -34,6 +38,9 @@ NO_TESTS="${NO_TESTS:-0}"
 SELF_REVIEW="${SELF_REVIEW:-auto}"
 TEST_MODEL="${TEST_MODEL:-sonnet}"
 LITE_MAX_LINES="${LITE_MAX_LINES:-150}"
+PREPARED_DIR="${PREPARED_DIR:-}"
+SKIP_REVIEW="${SKIP_REVIEW:-0}"
+[ "$SKIP_REVIEW" = "1" ] && SELF_REVIEW=0
 # No "LF will be replaced by CRLF" warnings in the log (only for this run, changes no git config)
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.safecrlf GIT_CONFIG_VALUE_0=false
 if [ "$NO_TESTS" = "1" ]; then
@@ -370,7 +377,7 @@ finish() {
   node "$RUNLOG" add "date=$(date '+%Y-%m-%d %H:%M')" "project=$(basename "$PWD")" "branch=$BRANCH" \
     "result=$result" "total=$((now-RUN_T0))" $durs "steps=$STEPS" "timeouts=$N_TIMEOUT" "fails=$N_FAIL" \
     "fixes=$N_FIX" "review_points=$NPTS" "out_of_scope=$NOUT" "recheck=$RECHECK" "lines=$lines" "cost=$cost" \
-    "no_tests=$NO_TESTS" "lite=$LITE" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
+    "no_tests=$NO_TESTS" "lite=$LITE" "harness=${WORKER_HARNESS:-claude}" "bench=${BENCH_ID:-}" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
   # Final line for qwen-progress.sh: the run is over, however it ended
   echo "== End"
   return 0
@@ -387,6 +394,13 @@ export WORKER_ACTIVITY="$PWD/$W/activity.log"; : > "$WORKER_ACTIVITY"
 COST0=$(node "$RUNLOG" cost 2>/dev/null || echo 0)
 
 # --- 1 Context: by script, for larger projects additionally by Qwen ----------
+if [ -n "$PREPARED_DIR" ]; then
+  # Benchmark: same plan, tests and context for every harness run
+  mark context
+  echo "== 1/6 Using the prepared plan and tests from $PREPARED_DIR"
+  NFILES=$(git ls-files | wc -l)
+  for f in context.txt plan.md deviations.md; do cp "$PREPARED_DIR/$f" "$W/$f" 2>/dev/null || : > "$W/$f"; done
+else
 mark context
 echo "== 1/6 Gathering context"
 NFILES=$(git ls-files | wc -l)
@@ -470,6 +484,7 @@ echo "== 2/6 $PLAN_MODEL is planning"
   echo "Existing functions may be refactored if that enables reuse instead of rebuilding;"
   echo "then name the file and the new signature."
 } | llm "$PLAN_MODEL" "You are a software architect. Answer directly and concisely." plan > "$W/plan.md"
+fi
 
 TESTCMD=$(grep -m1 -i '^TEST:' "$W/plan.md" | sed 's/^[Tt][Ee][Ss][Tt]: *//; s/`//g')
 STEPS=$(grep -c '^## Step ' "$W/plan.md")
@@ -480,6 +495,7 @@ awk '/^## Step /{exit} {print}' "$W/plan.md" > "$W/plan-head.md"
 echo "   $STEPS steps, test command: $TESTCMD"
 CHECKCMD=$(grep -m1 -i '^CHECK:' "$W/plan.md" | sed 's/^[Cc][Hh][Ee][Cc][Kk]: *//; s/`//g; s/ *$//')
 case "$CHECKCMD" in none|None|NONE|-|"$TESTCMD") CHECKCMD="" ;; esac
+[ -n "$PREPARED_DIR" ] && [ -f "$PREPARED_DIR/checkcmd.txt" ] && CHECKCMD=$(head -1 "$PREPARED_DIR/checkcmd.txt")
 [ -n "$CHECKCMD" ] && echo "   Full check: $CHECKCMD"
 
 # Size and split: Opus estimates the changed lines per step. Large plans are built in two
@@ -524,7 +540,7 @@ fi
 mark baseline
 # Check the starting state: if the test command is already red before the change, Qwen would
 # "fix" someone else's bugs (or configure them away). Better to abort and ask.
-if [ "$NFILES" -gt 0 ] && [ "${ALLOW_RED_BASE:-0}" != "1" ] && ! run_tests; then
+if [ -z "$PREPARED_DIR" ] && [ "$NFILES" -gt 0 ] && [ "${ALLOW_RED_BASE:-0}" != "1" ] && ! run_tests; then
   echo "ABORT: '$TESTCMD' is already red at the starting state. Last output:"
   tail -15 "$W/test.txt"
   echo "Please fix it first or narrow down the test command in the task."
@@ -534,17 +550,24 @@ if [ "$NFILES" -gt 0 ] && [ "${ALLOW_RED_BASE:-0}" != "1" ] && ! run_tests; then
 fi
 # The same for the full check, just without aborting: if it is already red before (or cannot
 # run here), it says nothing about the change and is skipped for this run.
-if [ -n "$CHECKCMD" ] && [ "$NFILES" -gt 0 ] && ! run_check "$CHECKCMD" > "$W/check-base.txt" 2>&1; then
+if [ -n "$CHECKCMD" ] && [ -z "$PREPARED_DIR" ] && [ "$NFILES" -gt 0 ] && ! run_check "$CHECKCMD" > "$W/check-base.txt" 2>&1; then
   echo "   Full check is already red at the starting state and is skipped, see $W/check-base.txt"
   CHECKCMD=""
 fi
 
 mark tests
-: > "$W/deviations.md"
 # --- 3 Tests first -----------------------------------------------------------
-if [ "$NO_TESTS" = "1" ]; then
+if [ -n "$PREPARED_DIR" ]; then
+echo "== 3/6 skipped (prepared tests)"
+if [ -s "$W/deviations.md" ]; then
+  { echo; echo "## Facts found while writing the tests (they take precedence over the plan)"
+    cat "$W/deviations.md"; } >> "$W/plan-head.md"
+fi
+elif [ "$NO_TESTS" = "1" ]; then
+: > "$W/deviations.md"
 echo "== 3/6 skipped (NO_TESTS=1)"
 else
+: > "$W/deviations.md"
 if [ "$TEST_MODEL" = "qwen" ]; then echo "== 3/6 Qwen writes the tests"; else echo "== 3/6 $TEST_MODEL writes the tests"; fi
 { echo "Write only the automated tests for this plan, no implementation yet."
   echo "Write exactly the tests listed in the plan under 'Tests:', no others and no"
@@ -579,6 +602,16 @@ if [ "$NDEV" -gt 0 ]; then
     cat "$W/deviations.md"; } >> "$W/plan-head.md"
   echo "   Tests found $NDEV plan deviation(s), passed on to all later steps"
 fi
+fi
+if [ "${STOP_AFTER_TESTS:-0}" = "1" ]; then
+  OUT="${PREPARE_OUT:-$W/prepared}"; mkdir -p "$OUT"
+  cp "$W/context.txt" "$W/plan.md" "$W/deviations.md" "$OUT/" 2>/dev/null
+  # The full check as it is actually used (empty if it was red at the starting state)
+  printf '%s
+' "$CHECKCMD" > "$OUT/checkcmd.txt"
+  RUN_DONE=1; RESULT_NOTE=prepared
+  echo "== Prepared on branch $BRANCH (plan and tests in $OUT)"
+  exit 0
 fi
 # Deviations section for the review prompts (empty if there are none)
 devnote() {
@@ -739,6 +772,11 @@ final_wrapup() {
   fi
 }
 
+if [ "$SKIP_REVIEW" = "1" ]; then
+  echo "== 6/6 skipped (SKIP_REVIEW=1)"
+  final_wrapup
+  exit 0
+fi
 # --- 6 Final review ----------------------------------------------------------
 # Test hook: REVIEW_BASE=<commit> makes the review check from that state instead of from the
 # start of the run (for the review test with deliberately planted bugs). Without the variable,

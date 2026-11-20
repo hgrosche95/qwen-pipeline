@@ -50,12 +50,33 @@ Before starting, the run aborts if:
 - the test command is already red (`ALLOW_RED_BASE=1` to override),
 - the current branch is detached, an old `qwen/*` branch, has a deleted upstream or is already merged into the default branch (`ALLOW_ANY_BRANCH=1` to override).
 
+## Worker harness: Claude Code or OpenCode
+
+The worker normally runs Qwen inside Claude Code. With `WORKER_HARNESS=opencode` it runs inside
+[OpenCode](https://opencode.ai) instead (`npm install -g opencode-ai`), against the same Strata
+server via its OpenAI-compatible API, with the same rules, time limit and 40-step limit.
+OpenCode gets its own config and data folders under `~/.opencode-worker`. The guard hook
+(`WORKER_GUARD=1`) only works with Claude Code.
+
+### Comparing harnesses fairly
+
+```bash
+qwen-bench.sh .worker/bench-tasks.txt "claude opencode" 2
+```
+
+For every task in the file (one per line), plan and tests are written **once** by Opus and
+Sonnet; then each harness implements exactly that plan against the same tests from the same
+commit, alternating between harnesses, twice each. No review (`BENCH_REVIEW=1` adds a Sonnet
+review). Only the plan and tests cost money. The summary in `.worker/bench/<id>/summary.txt`
+shows green runs, duration, time/turn limits, fix attempts, changed lines and, for OpenCode,
+the context size per session. Every run leaves its own `qwen/*` branch; nothing is merged.
+
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) (`claude` on the `PATH`)
 - A local Anthropic-compatible model server, e.g. Strata, by default at `http://127.0.0.1:8080`
 - `bash` (Git Bash on Windows), `git`, `node`, `curl`, `timeout` (coreutils)
-- Optional: `gh` for pull requests, `docker` if the project has a Dockerfile
+- Optional: `gh` for pull requests, `docker` if the project has a Dockerfile, `opencode` for `WORKER_HARNESS=opencode`
 
 ## Installation
 
@@ -92,6 +113,8 @@ plans and start end-to-end tests with servers.
 | `bin/usage-log.js` | Logs tokens and cost per Claude call to `.worker/usage.log` |
 | `bin/run-log.js` | One line per run in `~/.claude/qwen-runs.jsonl`; `node ~/.claude/bin/run-log.js show` |
 | `bin/qwen-queue.sh` | Behind `/qwen-queue` |
+| `bin/qwen-bench.sh` | Harness benchmark (see above) |
+| `bin/opencode-stream.js` | Turns OpenCode's JSON events into the same report and activity log as with Claude Code |
 | `bin/worker-guard.js` | PreToolUse hook for the worker with `WORKER_GUARD=1` (log: `~/.claude/logs/worker-guard.log`, `GUARD_MODE=block` to deny) |
 | `bin/test-wrap.sh` | Used by the guard: full test output to `~/.claude/logs/tests/`, only the essentials to the model |
 
@@ -113,6 +136,7 @@ Review rules learned across runs are collected in `~/.claude/worker-lessons.md`.
 | `TEST_TURNS` | `12` | Turn limit of the test model (each turn re-reads the history, the biggest cost item) |
 | `SPLIT_LINES` / `STEP_LINES` | `350` / `60` | Size thresholds for splitting |
 | `WORKER_TIMEOUT_MIN` | `20` (`30` with guard) | Time limit per worker session |
+| `WORKER_HARNESS` | `claude` | `opencode` runs the worker in OpenCode |
 | `WORKER_GUARD` / `GUARD_MODE` | `0` / `log` | Guard hook on; `block` denies dangerous calls instead of logging them |
 | `WORKER_CMD_TIMEOUT_MS` / `WORKER_CMD_MAX_TIMEOUT_MS` | `300000` / `600000` | Limit per worker shell command, so servers or wait loops cannot block a stage |
 | `CHECK_TIMEOUT_MIN` | `15` | Limit per test/check run of the pipeline (`0` = no limit) |

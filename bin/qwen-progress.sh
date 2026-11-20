@@ -129,6 +129,8 @@ event() {
       say "The queue is through: ${l#== Queue done: }."
       say "$(sed -n '/^== Queue done/,$p' "$LOG" 2>/dev/null | tail -n +2 | grep -v '^ *$' | sed 's/^ */  /')" ;;
     "WARNING: Tests are still red"*) red=1 ;;
+    "== 1/6 Using the prepared"*) late=0; checking=0; red=0; say "The run starts from the prepared plan and tests." ;;
+    "== Prepared on branch"*) say "Plan and tests are prepared: ${l#== Prepared on branch }." ;;
     "== 1/6"*) late=0; checking=0; red=0; say "The run has started. First the project is explored." ;;
     "== 2/6"*) say "The plan is being written." ;;
     *"steps, test command"*)
@@ -212,6 +214,7 @@ event() {
       if [ "$checking" = "1" ]; then say "The full check passed."; checking=0; else tests_note; fi
       late=1
       say "Now Qwen reads its own diff against the task and plan (self-review)." ;;
+    "== 6/6 skipped"*) commit_note; say "The review is skipped (benchmark run)." ;;
     "== 6/6"*)
       commit_note || [ "${selfskip:-0}" = "1" ] || say "The self-review is done."
       v=${l#== 6/6 }; say "Now comes the final review by $(model_name "${v% reviews}")." ;;

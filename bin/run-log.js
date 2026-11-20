@@ -77,7 +77,7 @@ if (cmd === "cost") {
     ["Pts", (r) => String(r.review_points ?? "-") + (r.out_of_scope > 0 ? "+" + r.out_of_scope : "")],
     ["Lines", (r) => String(r.lines ?? "-")],
     ["USD", (r) => (typeof r.cost === "number" ? r.cost.toFixed(2) : "-")],
-    ["Kind", (r) => (r.kind === "q" ? "/q Qwen only" : (String(r.lite) === "1" ? "lite, " : "") + (String(r.no_tests) === "1" ? "no tests" : "tests " + (r.test_model || "?")))],
+    ["Kind", (r) => (r.kind === "q" ? "/q Qwen only" : (r.harness && r.harness !== "claude" ? r.harness + ", " : "") + (String(r.lite) === "1" ? "lite, " : "") + (String(r.no_tests) === "1" ? "no tests" : "tests " + (r.test_model || "?")))],
     ["Task", (r) => String(r.task || "").slice(0, 44)],
   ];
   const shown = rows.slice(-n);

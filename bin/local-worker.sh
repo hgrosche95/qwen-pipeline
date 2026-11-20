@@ -99,7 +99,41 @@ SYS="$SYS and then read selectively with offset and limit; do not read any file 
 SYS="$SYS Start changing things after 15 turns at the latest."
 SYS="$SYS Finish with a summary of at most 15 lines: what was done, test result, open problems."
 
-if [ -n "${WORKER_ACTIVITY:-}" ] && command -v node >/dev/null 2>&1; then
+HARNESS="${WORKER_HARNESS:-claude}"
+if [ "$HARNESS" = "opencode" ]; then
+  # OpenCode as the worker's harness (WORKER_HARNESS=opencode), talking to the same Strata
+  # server through its OpenAI-compatible API. Same rules (as an instructions file), same time
+  # limit, same 40-step limit. Its own config and data folders under ~/.opencode-worker, so
+  # nothing from a personal OpenCode setup applies. The guard hook is Claude Code only.
+  command -v opencode >/dev/null 2>&1 || { echo "API Error: WORKER_HARNESS=opencode, but opencode is not installed (npm install -g opencode-ai)"; exit 4; }
+  [ "${WORKER_GUARD:-0}" = "1" ] && echo "Note: the guard hook only works with Claude Code, it is not active with OpenCode" >&2
+  OC="$HOME/.opencode-worker"; mkdir -p "$OC"
+  w() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+  printf '%s\n' "$SYS" | sed 's/\. /.\n/g' > "$OC/worker-rules.md"
+  OC_MODE="$MODE" OC_URL="$URL/v1" OC_KEY="$KEY" OC_MODEL="$MODEL" OC_RULES="$(w "$OC/worker-rules.md")" node -e '
+    const e = process.env, ro = e.OC_MODE === "read";
+    const cfg = {
+      $schema: "https://opencode.ai/config.json", autoupdate: false, share: "disabled",
+      provider: { strata: { npm: "@ai-sdk/openai-compatible", name: "Strata",
+        options: { baseURL: e.OC_URL, apiKey: e.OC_KEY },
+        models: { [e.OC_MODEL]: { name: e.OC_MODEL, limit: { context: 131072, output: 16384 } } } } },
+      model: "strata/" + e.OC_MODEL,
+      instructions: [e.OC_RULES],
+      agent: { build: { steps: 40 } },
+      permission: { edit: ro ? "deny" : "allow", bash: ro ? "deny" : "allow", webfetch: "deny" },
+    };
+    require("fs").writeFileSync(process.argv[1], JSON.stringify(cfg, null, 2));
+  ' "$(w "$OC/opencode.json")"
+  export OPENCODE_CONFIG="$(w "$OC/opencode.json")"
+  export XDG_CONFIG_HOME="$(w "$OC/config")" XDG_DATA_HOME="$(w "$OC/data")"
+  export XDG_CACHE_HOME="$(w "$OC/cache")" XDG_STATE_HOME="$(w "$OC/state")"
+  # stdin must be closed: "opencode run" otherwise waits for piped input forever.
+  # Step count and context size of the session go to <task>.harness.txt (for the benchmark).
+  timeout "${TMIN}m" opencode run --format json "Do the task described in the attached file. Follow it exactly." \
+    -f "$(w "$TASK")" < /dev/null 2>&1 \
+    | node "$HOME/.claude/bin/opencode-stream.js" "${WORKER_ACTIVITY:-}" 40 2>> "${TASK%.md}.harness.txt" | tee "$LOG"
+  STATUS=${PIPESTATUS[0]}
+elif [ -n "${WORKER_ACTIVITY:-}" ] && command -v node >/dev/null 2>&1; then
   # Live transcript: the worker emits its steps as a JSON stream, worker-stream.js writes
   # every tool use to $WORKER_ACTIVITY and only passes on the final report -
   # for the caller the output looks the same as without the transcript.
