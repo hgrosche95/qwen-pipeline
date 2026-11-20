@@ -104,3 +104,7 @@ Review rules learned across runs are collected in `~/.claude/worker-lessons.md`.
 | `CHECK_TIMEOUT_MIN` | `15` | Limit per test/check run of the pipeline (`0` = no limit) |
 | `ALLOW_RED_BASE` / `ALLOW_ANY_BRANCH` | `0` | Override the start checks |
 | `QWEN_PROGRESS` | quiet | `full` = report every stage |
+
+## License
+
+MIT, see [LICENSE](LICENSE).
