@@ -14,7 +14,7 @@ yourself: short, fluent status updates in plain English.
 Check with one single command how many tasks are in the file:
 grep -cvE '^[[:space:]]*(#|$)' <file>
 If the file is missing or contains no task, say so in one sentence, explain the format
-(one task per line, a line may start with /qwen or /qwen-no-tests, lines starting with #
+(one task per line, a line may start with /qwen, /qwen-lite or /qwen-no-tests, lines starting with #
 are comments, the file is best placed under .worker/, because that folder is excluded
 from git) and stop.
 

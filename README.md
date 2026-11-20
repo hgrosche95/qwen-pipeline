@@ -7,11 +7,24 @@ spent on the free local model; the paid models only see short, focused prompts.
 | Command | What it does |
 |---|---|
 | `/qwen <task>` | Full pipeline: Opus plans, Sonnet writes tests, Qwen implements step by step, Opus/Sonnet reviews, Qwen fixes the review points. |
+| `/qwen-lite <task>` | Cheap mode for small tasks: Sonnet plans and reviews, Qwen writes the tests. Stops right after the plan if it estimates more than 150 changed lines. |
 | `/qwen-no-tests <task>` | Same, but without tests: only build/linter check and review. |
 | `/q <small change>` | Qwen alone, no Claude model involved. Nothing is committed, nothing is checked. |
 | `/qwen-guard <task>` | Like `/qwen`, but the worker runs with a guard hook (dangerous commands, secret files, repeats), a 30-minute limit and shortened test output. |
 | `/qwen-queue [file]` | Several tasks one after another from `.worker/queue.txt`, each building on the previous one. |
 | `/qhandoff <task>` | Opus writes plan, scaffold and tests itself, Qwen finishes, Opus only checks diff and tests. |
+
+### Which command when
+
+| Task | Command |
+|---|---|
+| One line, a text, a color | `/q` (free) |
+| Small change with some logic | `/qwen-lite` |
+| UI, styling, configuration, CI, docs | `/qwen-no-tests` |
+| Larger or important logic (server, data, rules) | `/qwen` |
+
+`node ~/.claude/bin/run-log.js show` lists duration, result and cost per run, so you can see
+which mode pays off for which kind of task.
 
 ## How a `/qwen` run works
 
@@ -89,8 +102,9 @@ Review rules learned across runs are collected in `~/.claude/worker-lessons.md`.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PLAN_MODEL` / `REVIEW_MODEL` | `opus` | Planner and final reviewer |
-| `TEST_MODEL` | `sonnet` | Writes the tests; `qwen` = local worker |
+| `LITE` / `LITE_MAX_LINES` | `0` / `150` | Lite mode (Sonnet plans and reviews, Qwen writes tests) and its size limit |
+| `PLAN_MODEL` / `REVIEW_MODEL` | `opus` (`sonnet` with `LITE=1`) | Planner and final reviewer |
+| `TEST_MODEL` | `sonnet` (`qwen` with `LITE=1`) | Writes the tests; `qwen` = local worker |
 | `SMALL_REVIEW_MODEL` / `MID_REVIEW_MODEL` / `RECHECK_MODEL` | `sonnet` | Reviews of small diffs, mid-run check, recheck (`none` = off) |
 | `MAX_TRIES` | `3` | Fix attempts per red check |
 | `NO_TESTS` | `0` | `1` = no tests |

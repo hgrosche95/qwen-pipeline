@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage in the project folder: qwen-queue.sh [task file]     (default: .worker/queue.txt)
 # Works through several tasks one after another with qwen-first.sh. One task per line; the
-# line may start with "/qwen " or "/qwen-no-tests " (as you would type it in the chat),
+# line may start with "/qwen ", "/qwen-lite " or "/qwen-no-tests " (as typed in the chat),
 # empty lines and lines starting with # are skipped.
 # Each task builds on the previous one: qwen-first.sh creates its branch from the current
 # state, and after a green run that is the branch of the previous task. Nothing changes on
@@ -24,10 +24,11 @@ LAST=""; GREEN=0; SUMMARY=(); HALT=""
 TMP=$(mktemp)
 
 for k in "${!TASKS[@]}"; do
-  task="${TASKS[$k]}"; notests=0
+  task="${TASKS[$k]}"; notests=0; lite=0
   case "$task" in
     "/qwen-no-tests "*)   notests=1; task="${task#/qwen-no-tests }" ;;
     "/qwen-ohne-tests "*) notests=1; task="${task#/qwen-ohne-tests }" ;;
+    "/qwen-lite "*)       lite=1; task="${task#/qwen-lite }" ;;
     "/qwen "*)            task="${task#/qwen }" ;;
   esac
   title=$(printf '%s' "$task" | cut -c1-80)
@@ -36,7 +37,7 @@ for k in "${!TASKS[@]}"; do
   # The first task gets the normal starting branch check; from the second task on, the run
   # starts from the previous qwen/* branch on purpose
   anyb=0; [ "$k" -gt 0 ] && anyb=1
-  ALLOW_ANY_BRANCH=$anyb NO_TESTS=$notests PR=0 bash "$FIRST" "$task" 2>&1 | tee "$TMP"
+  ALLOW_ANY_BRANCH=$anyb LITE=$lite NO_TESTS=$notests PR=0 bash "$FIRST" "$task" 2>&1 | tee "$TMP"
   rc=${PIPESTATUS[0]}
   mins=$(( ($(date +%s) - t0 + 30) / 60 ))
   branch=$(sed -n 's/^== Done on branch //p' "$TMP" | tail -1)

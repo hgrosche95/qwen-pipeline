@@ -10,6 +10,10 @@
 # Large plans (sum of estimated lines above SPLIT_LINES, default 350) are built in two parts
 #   with a mid-run review by MID_REVIEW_MODEL (default sonnet). PARTS=1 turns this off,
 #   PARTS=2 forces it. STEP_LINES (default 60) is the upper limit per step in the plan.
+# Lite mode for small tasks: LITE=1 qwen-first.sh "..." - Sonnet plans and reviews, Qwen
+#   writes the tests. If the plan estimates more than LITE_MAX_LINES (default 150) changed
+#   lines, the run stops right after the plan and recommends the full pipeline.
+#   Explicitly set PLAN_MODEL/REVIEW_MODEL/TEST_MODEL still win.
 set -uo pipefail
 TASK="${1:?Usage: qwen-first.sh \"task\"}"
 PR="${PR:-0}"
@@ -17,12 +21,19 @@ case "$TASK" in --pr\ *) PR=1; TASK="${TASK#--pr }" ;; esac
 W=.worker
 WORKER="$HOME/.claude/bin/local-worker.sh"
 RULES="$HOME/.claude/worker-lessons.md"
+LITE="${LITE:-0}"
+if [ "$LITE" = "1" ]; then
+  PLAN_MODEL="${PLAN_MODEL:-sonnet}"
+  REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
+  TEST_MODEL="${TEST_MODEL:-qwen}"
+fi
 PLAN_MODEL="${PLAN_MODEL:-opus}"
 REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 MAX_TRIES="${MAX_TRIES:-3}"
 NO_TESTS="${NO_TESTS:-0}"
 SELF_REVIEW="${SELF_REVIEW:-auto}"
 TEST_MODEL="${TEST_MODEL:-sonnet}"
+LITE_MAX_LINES="${LITE_MAX_LINES:-150}"
 # No "LF will be replaced by CRLF" warnings in the log (only for this run, changes no git config)
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.safecrlf GIT_CONFIG_VALUE_0=false
 if [ "$NO_TESTS" = "1" ]; then
@@ -354,11 +365,12 @@ finish() {
   cost=$(awk -v a="$cost" -v b="$COST0" 'BEGIN{c=a-b; if(c<0)c=a; printf "%.4f", c}')
   lines=$(git diff --numstat "$BASE" "$BRANCH" 2>/dev/null | awk '{a+=$1+$2} END{print a+0}')
   if [ "$RUN_DONE" != "1" ]; then result=aborted; elif [ "$RED" -eq 1 ]; then result=red; else result=green; fi
+  [ -n "${RESULT_NOTE:-}" ] && result=$RESULT_NOTE
   # shellcheck disable=SC2086
   node "$RUNLOG" add "date=$(date '+%Y-%m-%d %H:%M')" "project=$(basename "$PWD")" "branch=$BRANCH" \
     "result=$result" "total=$((now-RUN_T0))" $durs "steps=$STEPS" "timeouts=$N_TIMEOUT" "fails=$N_FAIL" \
     "fixes=$N_FIX" "review_points=$NPTS" "out_of_scope=$NOUT" "recheck=$RECHECK" "lines=$lines" "cost=$cost" \
-    "no_tests=$NO_TESTS" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
+    "no_tests=$NO_TESTS" "lite=$LITE" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
   # Final line for qwen-progress.sh: the run is over, however it ended
   echo "== End"
   return 0
@@ -385,9 +397,16 @@ else
     for f in package.json pyproject.toml composer.json Makefile README.md; do
       [ -f "$f" ] && { echo; echo "--- $f (beginning)"; head -40 "$f"; }
     done
-    # CI workflows: the plan derives the full check (CHECK) from these
+    # CI workflows: the plan derives the full check (CHECK) from these. Only the parts it needs
+    # (job/step names, working directories, run commands incl. multi-line blocks) instead of
+    # 200 lines of YAML per file: the plan input was up to 46k tokens.
     for f in $(ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | head -4); do
-      echo; echo "--- $f (beginning)"; head -200 "$f"
+      echo; echo "--- $f (run commands)"
+      awk '
+        blk { match($0, /^ */); if (RLENGTH > ind || $0 ~ /^[[:space:]]*$/) { print; next } blk = 0 }
+        /^[[:space:]]*(-[[:space:]]+)?(name|working-directory|run):/ { print }
+        /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*[|>][-+]?[[:space:]]*$/ { match($0, /^ */); ind = RLENGTH; blk = 1 }
+      ' "$f" | grep -v '^[[:space:]]*$' | head -80
     done
   } > "$W/context.txt"
   if [ "$NFILES" -gt 40 ]; then
@@ -491,6 +510,15 @@ if [ "$SPLIT" -gt 0 ]; then
   echo "   Size: ~$TOTAL lines, two parts with a mid-run check after step $SPLIT"
 elif [ "$TOTAL" -gt 0 ]; then
   echo "   Size: ~$TOTAL lines, one part"
+fi
+# Lite mode is only for small tasks: with a weaker planner and Qwen-written tests, a large
+# task would quickly cost more in fix rounds than the cheaper models save.
+if [ "$LITE" = "1" ] && [ "$TOTAL" -gt "$LITE_MAX_LINES" ]; then
+  RESULT_NOTE=too-big
+  echo "ABORT: The plan estimates ~$TOTAL changed lines, more than lite mode is meant for ($LITE_MAX_LINES)."
+  echo "   Use /qwen for this task (the lite plan is in $W/plan.md), or raise LITE_MAX_LINES."
+  git checkout -q - && git branch -q -D "$BRANCH"
+  exit 1
 fi
 
 mark baseline
