@@ -25,6 +25,11 @@ case "$TASK" in --pr\ *) PR=1; TASK="${TASK#--pr }" ;; esac
 W=.worker
 WORKER="$HOME/.claude/bin/local-worker.sh"
 RULES="$HOME/.claude/worker-lessons.md"
+# Worker harness, resolved once so every stage and the run log use the same one (see local-worker.sh)
+if [ -z "${WORKER_HARNESS:-}" ]; then
+  if [ "${WORKER_GUARD:-0}" != "1" ] && command -v opencode >/dev/null 2>&1; then WORKER_HARNESS=opencode; else WORKER_HARNESS=claude; fi
+fi
+export WORKER_HARNESS
 LITE="${LITE:-0}"
 if [ "$LITE" = "1" ]; then
   PLAN_MODEL="${PLAN_MODEL:-sonnet}"
@@ -377,7 +382,7 @@ finish() {
   node "$RUNLOG" add "date=$(date '+%Y-%m-%d %H:%M')" "project=$(basename "$PWD")" "branch=$BRANCH" \
     "result=$result" "total=$((now-RUN_T0))" $durs "steps=$STEPS" "timeouts=$N_TIMEOUT" "fails=$N_FAIL" \
     "fixes=$N_FIX" "review_points=$NPTS" "out_of_scope=$NOUT" "recheck=$RECHECK" "lines=$lines" "cost=$cost" \
-    "no_tests=$NO_TESTS" "lite=$LITE" "harness=${WORKER_HARNESS:-claude}" "bench=${BENCH_ID:-}" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
+    "no_tests=$NO_TESTS" "lite=$LITE" "harness=$WORKER_HARNESS" "bench=${BENCH_ID:-}" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
   # Final line for qwen-progress.sh: the run is over, however it ended
   echo "== End"
   return 0
@@ -403,6 +408,7 @@ if [ -n "$PREPARED_DIR" ]; then
 else
 mark context
 echo "== 1/6 Gathering context"
+echo "   Worker harness: $WORKER_HARNESS"
 NFILES=$(git ls-files | wc -l)
 if [ "$NFILES" -eq 0 ]; then
   echo "EMPTY PROJECT" > "$W/context.txt"

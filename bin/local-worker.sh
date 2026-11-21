@@ -99,14 +99,19 @@ SYS="$SYS and then read selectively with offset and limit; do not read any file 
 SYS="$SYS Start changing things after 15 turns at the latest."
 SYS="$SYS Finish with a summary of at most 15 lines: what was done, test result, open problems."
 
-HARNESS="${WORKER_HARNESS:-claude}"
+# Default harness: OpenCode (faster in the harness benchmark, never hit the step limit), but
+# Claude Code when the guard is on (the hook only exists there) or OpenCode is not installed.
+# WORKER_HARNESS=claude or =opencode forces one.
+if [ -n "${WORKER_HARNESS:-}" ]; then HARNESS="$WORKER_HARNESS"
+elif [ "${WORKER_GUARD:-0}" != "1" ] && command -v opencode >/dev/null 2>&1; then HARNESS=opencode
+else HARNESS=claude; fi
 if [ "$HARNESS" = "opencode" ]; then
   # OpenCode as the worker's harness (WORKER_HARNESS=opencode), talking to the same Strata
   # server through its OpenAI-compatible API. Same rules (as an instructions file), same time
   # limit, same 40-step limit. Its own config and data folders under ~/.opencode-worker, so
   # nothing from a personal OpenCode setup applies. The guard hook is Claude Code only.
   command -v opencode >/dev/null 2>&1 || { echo "API Error: WORKER_HARNESS=opencode, but opencode is not installed (npm install -g opencode-ai)"; exit 4; }
-  [ "${WORKER_GUARD:-0}" = "1" ] && echo "Note: the guard hook only works with Claude Code, it is not active with OpenCode" >&2
+  [ "${WORKER_GUARD:-0}" = "1" ] && echo "Note: the guard hook only works with Claude Code, it is not active with OpenCode (WORKER_HARNESS=opencode was set)" >&2
   OC="$HOME/.opencode-worker"; mkdir -p "$OC"
   w() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
   printf '%s\n' "$SYS" | sed 's/\. /.\n/g' > "$OC/worker-rules.md"
