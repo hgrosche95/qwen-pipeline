@@ -71,6 +71,11 @@ review). Only the plan and tests cost money. The summary in `.worker/bench/<id>/
 shows green runs, duration, time/turn limits, fix attempts, changed lines and, for OpenCode,
 the context size per session. Every run leaves its own `qwen/*` branch; nothing is merged.
 
+To pause, run `touch .worker/bench/PAUSE` in the project: the current run finishes, then the
+benchmark stops and prints the results so far. `qwen-bench.sh --resume <id>` continues with the
+same saved tasks, plans and tests and skips every finished run, so nothing is planned or paid
+twice. A run that was killed halfway is simply run again.
+
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) (`claude` on the `PATH`)
