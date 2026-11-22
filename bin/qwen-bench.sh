@@ -3,6 +3,8 @@
 #   qwen-bench.sh <task file> [harnesses] [repeats]    start a new benchmark
 #     e.g. qwen-bench.sh .worker/bench-tasks.txt "claude opencode" 2
 #   qwen-bench.sh --resume <id>                       continue a paused or interrupted one
+#   qwen-bench.sh --reuse <old id> [harnesses] [repeats]  new benchmark on the plans and tests of an
+#                                                     earlier one (no planning cost, same specs)
 #   touch .worker/bench/PAUSE                         pause after the current run
 # Compares worker harnesses fairly: for each task, plan and tests are written ONCE (Opus/Sonnet,
 # the only paid part), then every harness implements that same plan against the same tests
@@ -28,6 +30,17 @@ if [ "${1:-}" = "--resume" ]; then
   REPEATS=$(sed -n 's/^repeats=//p' "$DIR/config")
   START=$(sed -n 's/^start=//p' "$DIR/config")
   RESUMED=1
+elif [ "${1:-}" = "--reuse" ]; then
+  OLD="${2:?Usage: qwen-bench.sh --reuse <old id> [harnesses] [repeats]}"; OLD="${OLD%/}"; OLD="${OLD##*/}"
+  ODIR=".worker/bench/$OLD"
+  [ -s "$ODIR/tasks.txt" ] || { echo "ABORT: $ODIR/tasks.txt is missing (benchmarks before the resume feature did not save it)."; exit 1; }
+  HARNESSES="${3:-claude opencode}"; REPEATS="${4:-2}"
+  START=$(git rev-parse --abbrev-ref HEAD)
+  ID="bench-$(date +%m%d-%H%M)"; DIR=".worker/bench/$ID"; mkdir -p "$DIR"
+  : > "$DIR/branches.txt"; cp "$ODIR/tasks.txt" "$DIR/"
+  for d in "$ODIR"/t*/; do [ -s "$d/prep-branch" ] && cp -r "$d" "$DIR/"; done
+  printf 'harnesses=%s\nrepeats=%s\nstart=%s\nreused=%s\n' "$HARNESSES" "$REPEATS" "$START" "$OLD" > "$DIR/config"
+  RESUMED=0
 else
   FILE="${1:?Usage: qwen-bench.sh <task file> [harnesses] [repeats] | --resume <id>}"
   HARNESSES="${2:-claude opencode}"
@@ -69,20 +82,20 @@ for (const r of rows) (by[r.harness || "claude"] ||= []).push(r);
 const avg = (a, f) => a.length ? a.reduce((s, r) => s + (Number(f(r)) || 0), 0) / a.length : 0;
 const ctx = (h) => { let n = 0, s = 0; for (const f of fs.readdirSync(dir)) if (f.includes("-" + h + "-") && f.endsWith(".harness.txt"))
   for (const m of fs.readFileSync(dir + "/" + f, "utf8").matchAll(/context_tokens=(\d+)/g)) { s += +m[1]; n++; } return n ? Math.round(s / n) : null; };
-const out = ["Harness    Runs  Green  Avg min  Steps min  Limits  Fixes  Lines  Avg context"];
+const out = ["Harness    Runs  Green  Avg min  Steps min  Limits  Fixes  Reverts  Lines  Avg context"];
 for (const [h, a] of Object.entries(by)) {
   const c = ctx(h);
   out.push([h.padEnd(10), String(a.length).padEnd(5), (a.filter((r) => r.result === "green").length + "/" + a.length).padEnd(6),
     (avg(a, (r) => r.total) / 60).toFixed(0).padEnd(8), (avg(a, (r) => r.t_steps) / 60).toFixed(0).padEnd(10),
-    avg(a, (r) => r.timeouts).toFixed(1).padEnd(7), avg(a, (r) => r.fixes).toFixed(1).padEnd(6),
+    avg(a, (r) => r.timeouts).toFixed(1).padEnd(7), avg(a, (r) => r.fixes).toFixed(1).padEnd(6), avg(a, (r) => r.test_reverts).toFixed(1).padEnd(8),
     avg(a, (r) => r.lines).toFixed(0).padEnd(6), c ? c + " tokens" : "-"].join(" "));
 }
 out.push("", "Per task and harness: green runs / runs");
 const tasks = [...new Set(rows.map((r) => String(r.bench).split("/")[1]))].sort();
 for (const t of tasks) out.push(t + ": " + Object.keys(by).map((h) => { const a = rows.filter((r) => String(r.bench).split("/")[1] === t && (r.harness || "claude") === h);
   return h + " " + a.filter((r) => r.result === "green").length + "/" + a.length; }).join(", "));
-out.push("", "Limits = worker time/turn limits per run, Fixes = fix attempts on red checks, Lines = changed lines.");
-out.push("Avg context = context size of an OpenCode session (Claude Code does not report it).");
+out.push("", "Limits = worker time/turn limits per run, Fixes = fix attempts on red checks, Reverts = test files restored by the test protection, Lines = changed lines.");
+out.push("Avg context = largest context of a worker session (reported by OpenCode and Pi only).");
 fs.writeFileSync(dir + "/summary.txt", out.join("\n") + "\n");
 console.log(out.join("\n"));
 ' "$QWEN_RUNS_FILE" "$ID" "$(command -v cygpath >/dev/null 2>&1 && cygpath -m "$DIR" || echo "$DIR")"

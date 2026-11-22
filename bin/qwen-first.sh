@@ -76,6 +76,11 @@ llm() {
 # Write a worker prompt (stdin -> file $1), append learned rules
 wprompt() {
   { cat; echo
+    if [ -n "$PROTECTED" ]; then
+      echo "The tests written for this plan are the specification. You may add tests and fix formatting,"
+      echo "but do not delete, weaken or change their existing assertions: such changes are reverted"
+      echo "automatically. If a test itself is wrong, leave it and explain why in your summary."
+    fi
     # Without tests (NO_TESTS=1), rules about tests are left out: otherwise they made Qwen
     # build test scripts nobody had asked for.
     if [ "$NO_TESTS" = "1" ]; then
@@ -106,6 +111,44 @@ strong_tests() {
 }
 
 commit() { git add -A && git commit -qm "qwen: $1" >/dev/null 2>&1; return 0; }
+
+# Test protection (TEST_PROTECT=1, default): the tests written in stage 3 are the specification.
+# In the harness benchmark one worker rewrote them and dropped an assertion while the run still
+# counted as green. After every worker session that changes code, each protected test file is
+# compared with its state right after the tests were written: adding tests and reformatting is
+# fine, but if an existing assertion is gone or changed, or the file was deleted, the file is put
+# back to that state. The checks then decide whether the code really fulfils the tests.
+# Every restore is logged in $W/test-protection.log and counted in the run log (test_reverts).
+PROTECT_REF=""; PROTECTED=""; N_PROTECT=0
+TEST_FILE_RE='(^|/)(tests?|__tests__|spec)/|[._-](test|spec)s?\.[a-z]+$|(^|/)test_[^/]*$'
+setup_test_protection() {
+  [ "${TEST_PROTECT:-1}" = "1" ] && [ "$NO_TESTS" != "1" ] || return 0
+  [ "$(git log -1 --format=%s 2>/dev/null)" = "qwen: Tests" ] || return 0
+  PROTECT_REF=$(git rev-parse HEAD)
+  PROTECTED=$(git diff-tree --no-commit-id --name-only --diff-filter=AM -r HEAD | grep -iE "$TEST_FILE_RE")
+  [ -n "$PROTECTED" ] && echo "   Test protection on for $(printf '%s\n' "$PROTECTED" | grep -c '') test file(s)"
+  return 0
+}
+# Prints why a protected file must be restored, or nothing if the change is fine
+test_damage() {
+  [ -f "$1" ] || { echo "file deleted"; return; }
+  git diff --quiet "$PROTECT_REF" -- "$1" && return
+  git diff -U0 "$PROTECT_REF" -- "$1" | node "$HOME/.claude/bin/test-protect.js" "$1"
+}
+protect_tests() {
+  [ -n "$PROTECT_REF" ] && [ -n "$PROTECTED" ] || return 0
+  local f why
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    why=$(test_damage "$f")
+    [ -n "$why" ] || continue
+    N_PROTECT=$((N_PROTECT+1))
+    { echo "== $(date +%H:%M) $f: $why"; git diff "$PROTECT_REF" -- "$f"; } >> "$W/test-protection.log" 2>/dev/null
+    git checkout -q "$PROTECT_REF" -- "$f"
+    echo "   Test protection: $f restored ($why)"
+  done <<< "$PROTECTED"
+  return 0
+}
 
 # Is the worker output ($1) an outage instead of an answer? Empty, or it ends with an error
 # message from the model server - that must never be used as a work result.
@@ -146,6 +189,7 @@ work() {
       echo "   Worker failed, retrying"
       sleep 15
     else
+      [ "$mode" = "code" ] && protect_tests
       return 0
     fi
   done
@@ -381,7 +425,7 @@ finish() {
   # shellcheck disable=SC2086
   node "$RUNLOG" add "date=$(date '+%Y-%m-%d %H:%M')" "project=$(basename "$PWD")" "branch=$BRANCH" \
     "result=$result" "total=$((now-RUN_T0))" $durs "steps=$STEPS" "timeouts=$N_TIMEOUT" "fails=$N_FAIL" \
-    "fixes=$N_FIX" "review_points=$NPTS" "out_of_scope=$NOUT" "recheck=$RECHECK" "lines=$lines" "cost=$cost" \
+    "fixes=$N_FIX" "test_reverts=$N_PROTECT" "review_points=$NPTS" "out_of_scope=$NOUT" "recheck=$RECHECK" "lines=$lines" "cost=$cost" \
     "no_tests=$NO_TESTS" "lite=$LITE" "harness=$WORKER_HARNESS" "bench=${BENCH_ID:-}" "test_model=$TEST_MODEL" "self_review=$SELF_REVIEW" "task=$TASK" 2>/dev/null
   # Final line for qwen-progress.sh: the run is over, however it ended
   echo "== End"
@@ -628,6 +672,7 @@ devnote() {
 
 # --- 4 Implementation step by step, each in a fresh session ------------------
 mark steps
+setup_test_protection
 i=1
 while [ "$i" -le "$STEPS" ]; do
   echo "== 4/6 Qwen implements step $i/$STEPS"

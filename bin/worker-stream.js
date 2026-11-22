@@ -9,6 +9,8 @@ const fs = require("fs");
 const readline = require("readline");
 
 const activityFile = process.argv[2];
+// Qwen Code (WORKER_HARNESS=qwen-code) emits the same stream format with its own tool names
+const TOOL = { write_file: "Write", edit: "Edit", replace: "Edit", read_file: "Read", read_many_files: "Read", run_shell_command: "Bash", grep_search: "Grep", search_file_content: "Grep", glob: "Glob", list_directory: "Glob" };
 let lastText = "";
 let finished = false;
 
@@ -40,7 +42,7 @@ rl.on("line", (line) => {
       if (block.type === "text" && block.text && block.text.trim()) lastText = block.text;
       if (block.type === "tool_use") {
         const input = block.input || {};
-        note(block.name, input.file_path || input.path || input.command || input.pattern || "");
+        note(TOOL[block.name] || block.name, input.file_path || input.absolute_path || input.path || input.command || input.pattern || "");
       }
     }
   } else if (event.type === "result") {
@@ -51,7 +53,10 @@ rl.on("line", (line) => {
     // only in the result event. qwen-first.sh needs "Reached max turns" to start a continuation
     // on what has been changed so far instead of a new attempt from scratch.
     const subtype = String(event.subtype || "");
-    if (subtype.includes("max_turns")) {
+    process.stderr.write(`[worker] steps=${event.num_turns ?? "?"} finish=${subtype || "-"}
+`);
+    // Qwen Code reports its turn limit as an error with this text
+    if (subtype.includes("max_turns") || /max session turns/i.test(JSON.stringify(event.error || ""))) {
       console.log(`Reached max turns (${event.num_turns ?? "?"})`);
     } else if (event.is_error || subtype.startsWith("error")) {
       console.log(`WORKER-ERROR: ${subtype || "is_error"}`);

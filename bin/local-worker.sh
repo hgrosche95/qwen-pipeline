@@ -101,7 +101,7 @@ SYS="$SYS Finish with a summary of at most 15 lines: what was done, test result,
 
 # Default harness: OpenCode (faster in the harness benchmark, never hit the step limit), but
 # Claude Code when the guard is on (the hook only exists there) or OpenCode is not installed.
-# WORKER_HARNESS=claude or =opencode forces one.
+# WORKER_HARNESS=claude, =opencode, =pi or =qwen-code forces one.
 if [ -n "${WORKER_HARNESS:-}" ]; then HARNESS="$WORKER_HARNESS"
 elif [ "${WORKER_GUARD:-0}" != "1" ] && command -v opencode >/dev/null 2>&1; then HARNESS=opencode
 else HARNESS=claude; fi
@@ -138,13 +138,60 @@ if [ "$HARNESS" = "opencode" ]; then
     -f "$(w "$TASK")" < /dev/null 2>&1 \
     | node "$HOME/.claude/bin/opencode-stream.js" "${WORKER_ACTIVITY:-}" 40 2>> "${TASK%.md}.harness.txt" | tee "$LOG"
   STATUS=${PIPESTATUS[0]}
+elif [ "$HARNESS" = "pi" ]; then
+  # Pi (pi.dev, npm install -g @earendil-works/pi-coding-agent) as the worker's harness: a very
+  # small system prompt and four tools (read, bash, edit, write; read mode: read, grep, find, ls).
+  # In an external benchmark with local models it solved the most tasks, fastest. Same rules
+  # (appended to its prompt), same time limit; it has no turn limit of its own, pi-stream.js
+  # ends the session after 40 turns. Own config folder ~/.pi-worker, no telemetry, offline
+  # startup, no extensions, skills, MCP or AGENTS.md/CLAUDE.md from the project.
+  command -v pi >/dev/null 2>&1 || { echo "API Error: WORKER_HARNESS=pi, but pi is not installed (npm install -g @earendil-works/pi-coding-agent)"; exit 4; }
+  PD="$HOME/.pi-worker"; mkdir -p "$PD"
+  w() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+  P_URL="$URL/v1" P_KEY="$KEY" P_MODEL="$MODEL" node -e '
+    const e = process.env;
+    require("fs").writeFileSync(process.argv[1], JSON.stringify({ providers: { strata: {
+      baseUrl: e.P_URL, api: "openai-completions", apiKey: e.P_KEY,
+      models: [{ id: e.P_MODEL, contextWindow: 131072, maxTokens: 16384 }] } } }, null, 2));
+  ' "$(w "$PD/models.json")"
+  printf '{"enableInstallTelemetry": false}\n' > "$PD/settings.json"
+  PTOOLS=(); [ "$MODE" = "read" ] && PTOOLS=(--tools read,grep,find,ls)
+  PI_CODING_AGENT_DIR="$(w "$PD")" PI_OFFLINE=1 PI_TELEMETRY=0 \
+    timeout "${TMIN}m" pi -p --mode json --no-session --no-extensions --no-skills --no-prompt-templates \
+      --no-context-files --no-mcp --provider strata --model "$MODEL" "${PTOOLS[@]}" \
+      --append-system-prompt "$SYS" "@$(w "$TASK")" "Do the task described in the attached file. Follow it exactly." \
+      < /dev/null 2>&1 \
+    | node "$HOME/.claude/bin/pi-stream.js" "${WORKER_ACTIVITY:-}" 40 2>> "${TASK%.md}.harness.txt" | tee "$LOG"
+  STATUS=${PIPESTATUS[0]}
+  # pi-stream.js stopped the session at the turn limit: Pi then ends on a broken pipe, which is
+  # not an outage
+  grep -q '^Reached max turns' "$LOG" && STATUS=0
+elif [ "$HARNESS" = "qwen-code" ]; then
+  # Qwen Code (npm install -g @qwen-code/qwen-code), the Qwen team's own harness, against the
+  # same Strata server via its OpenAI-compatible API. Same rules, time limit and 40-turn limit.
+  # Its stream format is the same as Claude Code's, so worker-stream.js reads it. Own config
+  # folder ~/.qwen-worker with usage statistics and telemetry off.
+  command -v qwen >/dev/null 2>&1 || { echo "API Error: WORKER_HARNESS=qwen-code, but qwen is not installed (npm install -g @qwen-code/qwen-code)"; exit 4; }
+  QH="$HOME/.qwen-worker"; mkdir -p "$QH"
+  w() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+  printf '%s\n' '{"privacy":{"usageStatisticsEnabled":false},"telemetry":{"enabled":false},"general":{"disableAutoUpdate":true,"disableUpdateNag":true}}' > "$QH/settings.json"
+  if [ "$MODE" = "read" ]; then QMODE=(--approval-mode plan); else QMODE=(--yolo); fi
+  # The task comes on stdin; the positional prompt is appended to it
+  QWEN_HOME="$(w "$QH")" QWEN_CODE_SUPPRESS_YOLO_WARNING=1 \
+    timeout "${TMIN}m" qwen --auth-type openai --openai-base-url "$URL/v1" --openai-api-key "$KEY" -m "$MODEL" \
+      "${QMODE[@]}" --max-session-turns 40 --chat-recording false --append-system-prompt "$SYS" \
+      -o stream-json "Do the task described above. Follow it exactly." \
+      < "$TASK" 2>> "${TASK%.md}.harness.txt" \
+    | node "$HOME/.claude/bin/worker-stream.js" "${WORKER_ACTIVITY:-}" 2>> "${TASK%.md}.harness.txt" | tee "$LOG"
+  STATUS=${PIPESTATUS[0]}
+  grep -q '^Reached max turns' "$LOG" && STATUS=0
 elif [ -n "${WORKER_ACTIVITY:-}" ] && command -v node >/dev/null 2>&1; then
   # Live transcript: the worker emits its steps as a JSON stream, worker-stream.js writes
   # every tool use to $WORKER_ACTIVITY and only passes on the final report -
   # for the caller the output looks the same as without the transcript.
   timeout "${TMIN}m" claude -p --max-turns 40 --allowedTools "$TOOLS" "${GUARD_ARGS[@]}" --output-format stream-json --verbose \
     --append-system-prompt "$SYS" \
-    < "$TASK" 2>&1 | node "$HOME/.claude/bin/worker-stream.js" "$WORKER_ACTIVITY" | tee "$LOG"
+    < "$TASK" 2>&1 | node "$HOME/.claude/bin/worker-stream.js" "$WORKER_ACTIVITY" 2>> "${TASK%.md}.harness.txt" | tee "$LOG"
   STATUS=${PIPESTATUS[0]}
 else
   timeout "${TMIN}m" claude -p --max-turns 40 --allowedTools "$TOOLS" "${GUARD_ARGS[@]}" \

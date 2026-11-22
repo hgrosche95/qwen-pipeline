@@ -34,6 +34,10 @@ which mode pays off for which kind of task.
    reports where the code contradicts the plan (`PLAN-DEVIATIONS:`); these facts go into every
    later prompt for Qwen and the reviewers, because the planner never sees the code.
 4. **Implementation**: Qwen implements each step in a fresh session, one commit per step. Large plans get a mid-run review.
+   **Test protection:** the tests from stage 3 are the specification. After every worker session,
+   a test file in which an existing assertion was removed or changed (or that was deleted) is put
+   back to its state after stage 3; adding tests and reformatting is fine. Restores are logged in
+   `.worker/test-protection.log` and counted in the run log (`TEST_PROTECT=0` turns it off).
 5. **Self-review** by Qwen, only if checks are still red (`SELF_REVIEW=auto`).
 6. **Final review** (`REVIEW_MODEL`, default `opus`, `sonnet` for small diffs), Qwen fixes the points,
    then a cheap recheck of the fixes. If the recheck still finds points, Qwen gets one more round
@@ -59,6 +63,16 @@ It falls back to Claude Code when OpenCode is not installed and for `/qwen-guard
 because the guard hook (`WORKER_GUARD=1`) only exists in Claude Code. `WORKER_HARNESS=claude`
 forces Claude Code.
 
+Two more harnesses can be chosen with `WORKER_HARNESS`, mainly for comparisons:
+
+| Value | Harness | Install |
+|---|---|---|
+| `pi` | [Pi](https://pi.dev): about 600 tokens of system prompt and four tools | `npm install -g @earendil-works/pi-coding-agent` |
+| `qwen-code` | [Qwen Code](https://github.com/QwenLM/qwen-code), the Qwen team's own harness | `npm install -g @qwen-code/qwen-code` |
+
+Both get their own config folder (`~/.pi-worker`, `~/.qwen-worker`) with telemetry and usage
+statistics off, the same rules, time limit and 40-turn limit.
+
 Why OpenCode: in a benchmark with 4 tasks in a Python and a TypeScript project (16 runs, same
 plans and tests for both), both harnesses got all runs green, but OpenCode took 17.5 instead of
 24.5 minutes on average and never hit the step limit, while Claude Code hit its turn limit in 2 of
@@ -68,6 +82,7 @@ plans and tests for both), both harnesses got all runs green, but OpenCode took 
 
 ```bash
 qwen-bench.sh .worker/bench-tasks.txt "claude opencode" 2
+qwen-bench.sh --reuse <id> "pi qwen-code opencode" 2   # same plans and tests as benchmark <id>
 ```
 
 For every task in the file (one per line), plan and tests are written **once** by Opus and
@@ -126,6 +141,8 @@ plans and start end-to-end tests with servers.
 | `bin/run-log.js` | One line per run in `~/.claude/qwen-runs.jsonl`; `node ~/.claude/bin/run-log.js show` |
 | `bin/qwen-queue.sh` | Behind `/qwen-queue` |
 | `bin/qwen-bench.sh` | Harness benchmark (see above) |
+| `bin/pi-stream.js` | The same for Pi, including its 40-turn limit |
+| `bin/test-protect.js` | Finds removed or changed assertions in a test file (test protection) |
 | `bin/opencode-stream.js` | Turns OpenCode's JSON events into the same report and activity log as with Claude Code |
 | `bin/worker-guard.js` | PreToolUse hook for the worker with `WORKER_GUARD=1` (log: `~/.claude/logs/worker-guard.log`, `GUARD_MODE=block` to deny) |
 | `bin/test-wrap.sh` | Used by the guard: full test output to `~/.claude/logs/tests/`, only the essentials to the model |
@@ -148,7 +165,8 @@ Review rules learned across runs are collected in `~/.claude/worker-lessons.md`.
 | `TEST_TURNS` | `12` | Turn limit of the test model (each turn re-reads the history, the biggest cost item) |
 | `SPLIT_LINES` / `STEP_LINES` | `350` / `60` | Size thresholds for splitting |
 | `WORKER_TIMEOUT_MIN` | `20` (`30` with guard) | Time limit per worker session |
-| `WORKER_HARNESS` | `opencode` (`claude` with the guard or without OpenCode) | Which harness runs the worker |
+| `WORKER_HARNESS` | `opencode` (`claude` with the guard or without OpenCode) | Which harness runs the worker: `opencode`, `claude`, `pi`, `qwen-code` |
+| `TEST_PROTECT` | `1` | Restore test files whose existing assertions the worker removed or changed |
 | `WORKER_GUARD` / `GUARD_MODE` | `0` / `log` | Guard hook on; `block` denies dangerous calls instead of logging them |
 | `WORKER_CMD_TIMEOUT_MS` / `WORKER_CMD_MAX_TIMEOUT_MS` | `300000` / `600000` | Limit per worker shell command, so servers or wait loops cannot block a stage |
 | `CHECK_TIMEOUT_MIN` | `15` | Limit per test/check run of the pipeline (`0` = no limit) |
